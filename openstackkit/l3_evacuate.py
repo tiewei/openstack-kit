@@ -68,6 +68,7 @@ class Picker(object):
                 self.dest[agent['id']]['agent'] = agent
                 self.dest[agent['id']]['routers'] = []
         self._dest_cycle = itertools.cycle(self.dest.keys())
+        self.src_router_count = None
 
     def has_next_for_agent(self, agent):
         return len(self.dest[agent['id']]['routers']) > 0
@@ -103,6 +104,7 @@ class BalancePicker(Picker):
     def init(self):
         routers = self.client.list_routers_on_l3_agent(
             self._src_agent['id']).get('routers', [])
+        self.src_router_count = len(routers)
         totals = {}
         for agent_id in self.dest.keys():
             totals[agent_id] = self.dest[agent_id][
@@ -120,6 +122,7 @@ class CyclePicker(Picker):
     def init(self):
         routers = self.client.list_routers_on_l3_agent(
             self._src_agent['id']).get('routers', [])
+        self.src_router_count = len(routers)
         for router in routers:
             agent_id = self._dest_cycle.next()
             self.dest[agent_id]['routers'].append(router)
@@ -185,6 +188,9 @@ class L3AgentEvacuator(object):
             raise Exception("No remote runner found for %s" % remote_runner)
 
     def run(self):
+        # start time
+        start_time = time.time()
+        log_info("start", "------ L3 agent evacuate start ------")
         # setup picker
         self.picker.init()
         # do migrate
@@ -206,12 +212,19 @@ class L3AgentEvacuator(object):
                          "Found new scheduled router on agent, retry evacuating")
                 self.run()
         else:
-            log_info("summary", "-----")
+            log_info("summary", "")
             new_routers = self._list_router_on_l3_agent(self._src_agent)
-            log_warn("summary",
-                     "[%d] routers are not evacuated" % len(new_routers))
-            for router in new_routers:
-                log_warn("summary", "router id %s" % router['id'])
+            if new_routers:
+                log_warn("summary",
+                         "[%d] routers are not evacuated" % len(new_routers))
+                for router in new_routers:
+                    log_warn("summary", "router id %s" % router['id'])
+        # end time
+        end_time = time.time()
+        evacuated = self.picker.src_router_count
+        log_info("summary", "evacuated %d routers off agent %s in %d seconds" % (
+            evacuated, self._src_agent['id'], end_time - start_time))
+        log_info("completed", "------ L3 agent evacuate end ------")
 
     def _list_router_on_l3_agent(self, agent):
         return self._neutron.list_routers_on_l3_agent(agent['id']).get('routers', [])
@@ -481,7 +494,6 @@ if __name__ == '__main__':
                         help="stop neutron-l3-agent after evacuate",
                         default=False)
     args = parser.parse_args()
-    log_info("start", "------ L3 agent evacuate start ------")
+
     SequenceEvacuator(args.agent_id, args.picker, args.runner,
                       stop_agent_after_evacuate=args.stopl3).run()
-    log_info("completed", "------ L3 agent evacuate end ------")
