@@ -22,7 +22,7 @@ def log_warn(action, msg):
 
 
 def log_error(action, msg):
-    loggging.error("[%-10s] - %s" % (action.upper(), msg))
+    logging.error("[%-10s] - %s" % (action.upper(), msg))
 
 # RemoteRunners - How to connect to remote server for checking
 
@@ -218,15 +218,25 @@ class L3AgentEvacuator(object):
 
     def _wait_until(self, func, *args, **kwargs):
         wait_time = 0
-        while wait_time <= self._wait_timeout:
+        wait_timeout = self._wait_timeout
+        wait_interval = self._wait_interval
+        least_wait_time = self._least_wait_time
+        if 'wait_timeout' in kwargs:
+            wait_timeout = kwargs.pop('wait_timeout')
+        if 'wait_interval' in kwargs:
+            wait_interval = kwargs.pop('wait_interval')
+        if 'least_wait_time' in kwargs:
+            least_wait_time = kwargs.pop('least_wait_time')
+
+        while wait_time <= wait_timeout:
             if not func(*args, **kwargs):
-                wait_time += self._wait_interval
-                time.sleep(self._wait_interval)
+                wait_time += wait_interval
+                time.sleep(wait_interval)
             else:
                 break
-        if wait_time < self._least_wait_time:
-            time.sleep(self._least_wait_time - wait_time)
-        if wait_time > self._wait_timeout:
+        if wait_time < least_wait_time:
+            time.sleep(least_wait_time - wait_time)
+        if wait_time > wait_timeout:
             return False
         else:
             return True
@@ -300,6 +310,13 @@ class L3AgentEvacuator(object):
                      (router['id'], agent['id'], agent['host'], nic, verfied))
             state = state & verfied
         return state
+
+    def _extra_timeout_for_router(self, router):
+        ports = self._neutron.list_ports(
+            device_id=router['id']).get('ports', [])
+        floating_ips = self._neutron.list_floatingips(
+            router_id=router['id']).get('floatingips', [])
+        return len(ports) + len(floating_ips)
 
     def _cmd_list_nic_in_netns(self, netns):
         return ["ip", "netns", "exec", netns, "ls", "-1", "/sys/class/net/"]
@@ -400,10 +417,23 @@ class SequenceEvacuator(L3AgentEvacuator):
             try:
                 # check the server if the routers setting is correct
                 if not self._verify_router_on_host(agent, router):
-                    # if not, migrate again to the the same node
+                    # wait again, since port with mutil floating ip will takes
+                    # time to add
+                    extra_timeout = self._extra_timeout_for_router(router)
                     log_warn(
-                        "verify add failed", "check router %s on agent %s, rm-add again" % (router['id'], agent['id']))
-                    return self.migrate_router(agent, router)
+                        "verify add failed", "failed to verify router %s on agent %s, wait for another %d seconds" % (router['id'], agent['id'], extra_timeout))
+                    added = self._wait_until(
+                        self._verify_router_on_host, agent, router, wait_timeout=extra_timeout, least_wait_time=1, wait_interval=1)
+                    if not added:
+                        # if not, migrate again to the the same node
+                        log_warn(
+                            "verify add failed", "failed to add router %s on agent %s, rm-add again" % (router['id'], agent['id']))
+
+                        return self.migrate_router(agent, router, src_agent=agent)
+                    else:
+                        log_info("add complete",
+                                 "add router %s to agent %s" % (router['id'], agent['id']))
+                        return True
                 else:
                     log_info("add complete",
                              "add router %s to agent %s" % (router['id'], agent['id']))
@@ -413,10 +443,12 @@ class SequenceEvacuator(L3AgentEvacuator):
                           (router['id'], agent['id'], e.message))
                 return True
 
-    def migrate_router(self, target_agent, router):
+    def migrate_router(self, target_agent, router, src_agent=None):
+        if not src_agent:
+            src_agent = self._src_agent
         log_info("migrate start", "Start migrate router %s from %s to %s" % (
-            router['id'], self._src_agent['id'], target_agent['id']))
-        removed = self._remove_router(self._src_agent, router)
+            router['id'], src_agent['id'], target_agent['id']))
+        removed = self._remove_router(src_agent, router)
         if removed:
             self._add_router(target_agent, router)
         log_info("migrate end", "End migrate router %s from %s to %s" %
@@ -429,7 +461,7 @@ class SequenceEvacuator(L3AgentEvacuator):
 
 
 class BatchEvacuator(L3AgentEvacuator):
-    #improve performance
+    # improve performance
     pass
 
 
