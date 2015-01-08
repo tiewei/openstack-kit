@@ -323,7 +323,7 @@ class L3AgentEvacuator(object):
                      "Found snat rule in namespace %s on host [%s], neutron finished the router add" % (namespace, host))
             return True
         else:
-            log_warn("verify wait",
+            log_debug("verify wait",
                      "Failed to find snat rule in namespace %s on host [%s], waiting for neutron" % (namespace, host))
             return False
 
@@ -531,7 +531,7 @@ class SequenceEvacuator(L3AgentEvacuator):
         routes = router['routes']
         return len(ports) + len(floating_ips) + len(routes)
 
-    def migrate_router(self, target_agent, router, src_agent=None, retry=1):
+    def migrate_router(self, target_agent, router, src_agent=None, retry=0):
         if not src_agent:
             src_agent = self._src_agent
         log_info("migrate start", "Start migrate router %s from %s to %s" % (
