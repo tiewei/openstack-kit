@@ -60,7 +60,7 @@ class AnsibleRemoteRunner(RemoteRunner):
             run_hosts=[host],
             module_name='shell',
             module_args=" ".join(cmd),
-            timeout=12,
+            timeout=12
         ).run()
         if host in results['contacted']:
             return (results['contacted'][host]['rc'], results['contacted'][host]['stdout'], results['contacted'][host]['stderr'])
@@ -360,7 +360,7 @@ class L3AgentEvacuator(object):
         host = agent['host']
         namespace = "qrouter-%s" % router['id']
         ports = self._neutron.list_ports(
-            device_id=router['id']).get('ports', [])
+            device_id=router['id'], admin_state_up=True).get('ports', [])
         if len(ports) == 0:
             return True
         state = True
@@ -397,7 +397,7 @@ class L3AgentEvacuator(object):
                 raise Exception(
                     "Failed list nics in namespace %s on host [%s]" % (netns, host))
 
-    def _cmd_delete_ovs_port(self, port_name, br_name="br-router", timeout=10):
+    def _cmd_delete_ovs_port(self, port_name, br_name="", timeout=10):
         return ["ovs-vsctl", "--timeout=%d" % timeout, "--", "--if-exists",
                 "del-port", br_name, port_name]
 
@@ -408,10 +408,17 @@ class L3AgentEvacuator(object):
         for one_nic in nics:
             log_debug(
                 "port deleting", "start deleting port %s on host %s" % (one_nic, host))
-            succeed, output = self.remote_runner.run(
-                host, self._cmd_delete_ovs_port(one_nic))
+            if 'qg-' in one_nic:
+                succeed, output = self.remote_runner.run(
+                    host, self._cmd_delete_ovs_port(one_nic, br_name='br-router'))
+            elif 'qr-' in one_nic:
+                succeed, output = self.remote_runner.run(
+                    host, self._cmd_delete_ovs_port(one_nic, br_name='br-int'))
+            else:
+                succeed, output = self.remote_runner.run(
+                    host, self._cmd_delete_ovs_port(one_nic))
             if not succeed:
-                log_error(
+                log_warn(
                     "port deleting", "Failed to delete port %s on host %s - %s" % (one_nic, host, output))
 
     def _stop_agent(self, host):
@@ -480,7 +487,7 @@ class SequenceEvacuator(L3AgentEvacuator):
                 return self._add_router(agent, router, retry=retry - 1)
             else:
                 log_error("api add failed",
-                          "add router %s to agent %s failed, retry" % (router['id'], agent['id']))
+                          "add router %s to agent %s failed by api" % (router['id'], agent['id']))
                 return False
         else:
             try:
