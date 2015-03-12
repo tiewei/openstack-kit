@@ -20,7 +20,7 @@ JOIN
                          Count(p.id)    AS count
                 FROM     nova.instances AS ins
                 JOIN     neutron.ports  AS p
-                where    ins.uuid=p.device_id
+                WHERE    ins.uuid=p.device_id
                 AND      ins.deleted=0
                 AND      ins.vm_state='active'
                 AND      ins.task_state IS NULL
@@ -54,7 +54,7 @@ JOIN
                          Count(p.id)    AS count
                 FROM     nova.instances AS ins
                 JOIN     neutron.ports  AS p
-                where    ins.uuid=p.device_id
+                WHERE    ins.uuid=p.device_id
                 AND      ins.deleted=0
                 AND      ins.vm_state='active'
                 AND      ins.task_state IS NULL
