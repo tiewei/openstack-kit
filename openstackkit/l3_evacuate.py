@@ -4,7 +4,6 @@ import logging
 import os
 import time
 import itertools
-import sys
 import ansible.runner
 from logging.handlers import SysLogHandler
 from neutronclient.common.exceptions import NeutronClientException
@@ -12,6 +11,7 @@ from neutronclient.v2_0 import client
 
 
 LOG = logging.getLogger('neutron-l3-evacuate')
+
 
 def setup_logging(enable_debug):
     level = logging.INFO
@@ -68,7 +68,7 @@ class AnsibleRemoteRunner(RemoteRunner):
                     results['contacted'][host]['stdout'],
                     results['contacted'][host]['stderr'])
         else:
-            return (1, None, results['dark'][host][msg])
+            return (1, None, results['dark'][host])
 
     def service_exec(self, host, service, action):
         results = ansible.runner.Runner(
@@ -81,7 +81,7 @@ class AnsibleRemoteRunner(RemoteRunner):
             return (results['contacted'][host]['state'],
                     results['contacted'][host]['changed'])
         else:
-            return (1, None, results['dark'][host][msg])
+            return (1, None, results['dark'][host])
 
 
 # Pickers - How to select the destination for one router
@@ -168,7 +168,7 @@ class CyclePicker(Picker):
 class L3AgentEvacuator(object):
 
     def __init__(self, **kwargs):
-        if "insecure" in kwargs and kwargs['insecure'] == True:
+        if "insecure" in kwargs and kwargs['insecure'] is True:
             self._insecure_client = True
         else:
             self._insecure_client = False
@@ -179,7 +179,8 @@ class L3AgentEvacuator(object):
             target_agent_id_1 = None
             target_agent_id_2 = None
             if 'agent' in kwargs and kwargs['agent']:
-                target_agent_id_1 = self._get_agent_id(agent_id)
+                agent = kwargs['agent']
+                target_agent_id_1 = self._get_agent_id(agent)
             if 'target' in kwargs and kwargs['target']:
                 target = kwargs['target']
                 target_agent_id_2 = self._get_agent_id(target)
@@ -197,7 +198,7 @@ class L3AgentEvacuator(object):
                 raise Exception("Invalid target hostname or agent id")
         self._src_agent = self._neutron.show_agent(agent_id).get('agent', {})
 
-        if 'stopl3' in kwargs and kwargs['stopl3'] == True:
+        if 'stopl3' in kwargs and kwargs['stopl3'] is True:
             self._stop_agent_after_evacuate = True
         else:
             self._stop_agent_after_evacuate = False
@@ -221,14 +222,16 @@ class L3AgentEvacuator(object):
             self._setup_picker(kwargs['picker'])
         else:
             self._setup_picker('balance')
-
-
+        if 'retry' in kwargs and kwargs['retry'] >= 0:
+            self._retry = kwargs['retry']
+        else:
+            self._retry = 1
 
     def _get_agent_id(self, hostname_or_id):
         agents = self._neutron.list_agents(agent_type='L3 agent').get('agents')
         for one_agent in agents:
             if one_agent['id'] == hostname_or_id or \
-                one_agent['host'] == hostname_or_id:
+               one_agent['host'] == hostname_or_id:
                 return one_agent['id']
         return None
 
@@ -283,7 +286,7 @@ class L3AgentEvacuator(object):
             else:
                 # run the whole agent evacuate again
                 log_info("summary", "Found %d new scheduled router on agent, "
-                         "retry evacuating" % len(new_routers))
+                         "retry evacuating" % len(left_routers))
                 self.run()
         else:
             log_info("summary", "")
@@ -507,13 +510,13 @@ class L3AgentEvacuator(object):
         if not succeed:
             log_warn("netns deleting",
                      "Failed to delete netns %s on host %s - %s" %
-                     (one_nic, host, output))
+                     (namespace, host, output))
 
     def _stop_agent(self, host):
         service_exec = getattr(self.remote_runner, "service_exec", None)
         if callable(service_exec):
             state, _ = self.remote_runner.service_exec(host, 'neutron-l3-agent',
-                                                     'stopped')
+                                                       'stopped')
             if state == 'stopped':
                 result = True
             else:
@@ -524,36 +527,34 @@ class L3AgentEvacuator(object):
         if not result:
             log_error("service stop", "Failed to stop neutron-l3-agent")
         else:
-            log_info("service stop", "Failed to stop neutron-l3-agent")
+            log_info("service stop", "Stopped neutron-l3-agent")
 
 
 class SequenceEvacuator(L3AgentEvacuator):
 
-    def _remove_router(self, agent, router, retry=1):
+    def _remove_router(self, agent, router, retry=0):
         log_debug("remove start", "remove router %s from %s" %
                   (router['id'], agent['id']))
+        need_retry = False
         try:
             self._neutron.remove_router_from_l3_agent(
                 agent['id'], router['id'])
-        except NeutronClientException as e:
-            log_error("neutron error", "error remove router %s from "
-                      "agent %s - %s" % (router['id'], agent['id'], e.message))
-            return False
-
-        if not self._wait_until(self._check_api_removed, agent, router):
-            if retry > 0:
-                # remove again
+            if not self._wait_until(self._check_api_removed, agent, router):
+                need_retry = True
                 log_warn("api remove failed",
-                         "remove router %s from agent %s, retry"
+                         "failed to remove router %s from agent %s"
                          % (router['id'], agent['id']))
+        except NeutronClientException as e:
+            need_retry = True
+            log_warn("neutron exception", "remove router %s from "
+                     "agent %s - %s" % (router['id'], agent['id'], e.message))
+        finally:
+            if not need_retry:
+                return True
+            if retry > 0:
                 return self._remove_router(agent, router, retry=retry - 1)
             else:
-                log_error("api remove failed",
-                          "failed to remove router %s from agent %s"
-                          % (router['id'], agent['id']))
                 return False
-        else:
-            return True
 
     def _ensure_router_cleaned(self, agent, router):
         try:
@@ -563,33 +564,32 @@ class SequenceEvacuator(L3AgentEvacuator):
                       (router['id'], agent['id']))
             return True
         except Exception as e:
-            log_warn("ensure error", "error ensure clean router %s from agent"
+            log_warn("ensure exception", "exception ensure clean router %s from agent"
                      " %s - %s" % (router['id'], agent['id'], e.message))
             return False
 
-    def _add_router(self, agent, router, retry=1):
+    def _add_router(self, agent, router, retry=0):
         log_debug("add start", "add router %s to agent %s" %
                   (router['id'], agent['id']))
+        need_retry = False
         try:
             self._neutron.add_router_to_l3_agent(
                 agent['id'], dict(router_id=router['id']))
+            if not self._wait_until(self._check_api_added, agent, router):
+                need_retry = True
+                log_warn("api add failed", "failed add router %s to agent %s" %
+                         (router['id'], agent['id']))
         except NeutronClientException as e:
-            log_error("neutron error", "error add router %s to agent %s - %s" %
-                      (router['id'], agent['id'], e.message))
-            return False
-
-        if not self._wait_until(self._check_api_added, agent, router):
+            need_retry = True
+            log_warn("neutron exception", "exception add router %s to agent %s - %s" %
+                     (router['id'], agent['id'], e.message))
+        finally:
+            if not need_retry:
+                return True
             if retry > 0:
-                # add again
-                log_warn("api add failed", "add router %s to agent %s failed, "
-                         "retry" % (router['id'], agent['id']))
                 return self._add_router(agent, router, retry=retry - 1)
             else:
-                log_error("api add failed", "add router %s to agent %s failed "
-                          "by api" % (router['id'], agent['id']))
                 return False
-        else:
-            return True
 
     def _ensure_router_added(self, agent, router):
         try:
@@ -637,19 +637,40 @@ class SequenceEvacuator(L3AgentEvacuator):
         routes = router['routes']
         return len(ports) + len(floating_ips) + len(routes)
 
-    def migrate_router(self, target_agent, router, src_agent=None, retry=0):
+    def _retry_failed_router(self, router, src_agent, retry=0):
+        if retry < 0:
+            return
+        agents = self._neutron.list_l3_agent_hosting_routers(
+            router['id']).get('agents', [])
+        if len(agents) > 0:
+            # if it's hosted by any agent, just leave it there
+            agent = agents[0]
+            ensured = self._ensure_router_added(agent, router)
+            if ensured:
+                if agent['id'] != src_agent['id']:
+                    self._ensure_router_cleaned(src_agent, router)
+                return True
+            else:
+                log_error("add error", "Router %s migrate failed, need verify"
+                          " manually" % router['id'])
+        else:
+            # add it back to src_agent
+            self._add_router(src_agent, router, self._retry)
+            # ignore it for now, let the next run migrate it
+            self._retry_failed_router(router, src_agent, retry-1)
+
+    def migrate_router(self, target_agent, router, src_agent=None):
         if not src_agent:
             src_agent = self._src_agent
         log_info("migrate start", "Start migrate router %s from %s to %s" % (
             router['id'], src_agent['id'], target_agent['id']))
-        removed = self._remove_router(src_agent, router)
+        removed = self._remove_router(src_agent, router, self._retry)
         if removed:
             log_info("router removed", "Removed router %s from %s" % (
                 router['id'], src_agent['id']))
-            added = self._add_router(target_agent, router, retry)
+            added = self._add_router(target_agent, router, self._retry)
             ports = self._neutron.list_ports(
                 device_id=router['id'], admin_state_up=True).get('ports', [])
-
             if added and len(ports) > 0:
                 # ensure the router is on the target host
                 ensure_added = self._ensure_router_added(target_agent, router)
@@ -657,15 +678,15 @@ class SequenceEvacuator(L3AgentEvacuator):
                 if ensure_added:
                     self._ensure_router_cleaned(src_agent, router)
                 else:
-                    log_error("add error", "add router %s to %s failed, need verify"
-                          " manually" % (router['id'], target_agent['id']))
+                    self._retry_failed_router(router, src_agent, self._retry)
             elif len(ports) == 0:
+                # skip if no ports on the router
                 pass
             else:
-                log_error("add error", "add router %s to %s failed, need verify"
-                          " manually" % (router['id'], target_agent['id']))
+                self._retry_failed_router(router, src_agent, self._retry)
         else:
-            log_warn("remove error", "Failed remove router %s from %s" % (
+            # if remove failed, left it there for next loop
+            log_warn("remove failed", "Failed remove router %s from %s by api" % (
                 router['id'], src_agent['id']))
 
         log_info("migrate end", "End migrate router %s from %s to %s" %
@@ -675,7 +696,6 @@ class SequenceEvacuator(L3AgentEvacuator):
         while self.picker.has_next():
             agent, router = self.picker.get_next()
             self.migrate_router(agent, router)
-
 
 
 if __name__ == '__main__':
