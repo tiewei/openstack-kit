@@ -1,4 +1,5 @@
 #! /usr/bin/python
+# @author: wtie
 import subprocess
 import sys
 import time
@@ -20,7 +21,7 @@ JOIN
                          Count(p.id)    AS count
                 FROM     nova.instances AS ins
                 JOIN     neutron.ports  AS p
-                WHERE    ins.uuid=p.device_id
+                where    ins.uuid=p.device_id
                 AND      ins.deleted=0
                 AND      ins.vm_state='active'
                 AND      ins.task_state IS NULL
@@ -54,7 +55,7 @@ JOIN
                          Count(p.id)    AS count
                 FROM     nova.instances AS ins
                 JOIN     neutron.ports  AS p
-                WHERE    ins.uuid=p.device_id
+                where    ins.uuid=p.device_id
                 AND      ins.deleted=0
                 AND      ins.vm_state='active'
                 AND      ins.task_state IS NULL
@@ -97,6 +98,9 @@ def ping_loop(net_uuid=None):
         sys.stdout.flush()
         if result == 1:
             fail_list.append(ip)
+
+        #simple way to remove duplicate ips, need to improve
+        fail_list = list(set(fail_list))
     if DIFF:
         if FIRST:
             diff_list = [ip for ip in fail_list if ip not in FIRST]
@@ -108,6 +112,23 @@ def ping_loop(net_uuid=None):
                                                len(fail_list), fail_list)
     else:
         print "\n[%s] %s: %s" % (total, len(fail_list), fail_list)
+    return fail_list
+
+def print_report(failed_map, least_interval):
+    report = {}
+    for ip in failed_map:
+        if failed_map[ip] == 1:
+            pass
+
+        if failed_map[ip] in report:
+            report[failed_map[ip]].append(ip)
+        else:
+            report[failed_map[ip]] = [ip]
+    print "REPORT:\n"
+    for count in report:
+        outage = least_interval * (count - 1)
+        print("~%s :\n %s\n" % (outage, report[count]))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -118,12 +139,24 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     public_network_uuid = args.net_id if args.net_id else None
+    least_interval = 10
     if args.diff:
         DIFF = True
     while True:
-        start = time.time()
-        print time.strftime("%x %X")
-        ping_loop(public_network_uuid)
-        end = time.time()
-        if int(end-start) < 2:
-            time.sleep(2- int(end-start))
+        try:
+            start = time.time()
+            print time.strftime("%x %X")
+            failed_map = {}
+            fail_list = ping_loop(public_network_uuid)
+            for ip in fail_list:
+                if ip in failed_map:
+                    failed_map[ip] += 1
+                else:
+                    failed_map[ip] = 1
+            end = time.time()
+            if (end-start) < least_interval:
+                time.sleep(least_interval - (end-start))
+        except KeyboardInterrupt:
+            print_report(failed_map,least_interval)
+            sys.exit(0)
+
